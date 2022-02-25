@@ -226,6 +226,7 @@ def export_engine(model, im, file, train, half, simplify, workspace=4, verbose=F
             raise RuntimeError(f'failed to load ONNX file: {onnx}')
 
         inputs = [network.get_input(i) for i in range(network.num_inputs)]
+        network.get_input(0).dtype = trt.DataType.FLOAT  # make sure input is FP32
         outputs = [network.get_output(i) for i in range(network.num_outputs)]
         LOGGER.info(f'{prefix} Network Description:')
         for inp in inputs:
