@@ -161,7 +161,7 @@ def run(data,
     model.eval()
     is_coco = isinstance(data.get('val'), str) and data['val'].endswith('coco/val2017.txt')  # COCO dataset
     nc = 1 if single_cls else int(data['nc'])  # number of classes
-    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
+    iouv = torch.linspace(0, 0.95, 20).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
 
     # Dataloader
@@ -182,6 +182,9 @@ def run(data,
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class = [], [], [], []
     pbar = tqdm(dataloader, desc=s, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')  # progress bar
+    
+    totalcorrect = [0] * niou
+
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         t1 = time_sync()
         if pt or jit or engine:
@@ -201,6 +204,13 @@ def run(data,
         if compute_loss:
             loss += compute_loss([x.float() for x in train_out], targets)[1]  # box, obj, cls
 
+        # set confidence for all detections except for the most likely one to 0
+        vals, ins = torch.max(out[..., 4], 1)
+        for index, element_index in enumerate(ins):
+            out[index, ..., 4:] = 0.0
+            out[index, element_index, 4] = vals[index]
+            out[index, element_index, 5] = 1.0
+
         # NMS
         targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
@@ -209,6 +219,7 @@ def run(data,
         dt[2] += time_sync() - t3
 
         # Metrics
+        numcorrect = [0] * niou
         for si, pred in enumerate(out):
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
@@ -237,6 +248,9 @@ def run(data,
                     confusion_matrix.process_batch(predn, labelsn)
             else:
                 correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool)
+            for iou_value in range(niou):
+                if(correct[0, iou_value]):
+                    numcorrect[iou_value] += 1
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))  # (correct, conf, pcls, tcls)
 
             # Save/log
@@ -245,6 +259,8 @@ def run(data,
             if save_json:
                 save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
             callbacks.run('on_val_image_end', pred, predn, path, names, im[si])
+        
+        totalcorrect = [sum(x) for x in zip(totalcorrect, numcorrect)]
 
         # Plot images
         if plots and batch_i < 3:
@@ -271,6 +287,10 @@ def run(data,
     if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
         for i, c in enumerate(ap_class):
             LOGGER.info(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
+
+    print("Total correct:", totalcorrect)#, " / ", totalcorrect/seen*100.0)
+    for iou_value in range(niou):
+        print("(", iouv[iou_value].item(), ",", totalcorrect[iou_value] / seen * 100.0, ")")
 
     # Print speeds
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
